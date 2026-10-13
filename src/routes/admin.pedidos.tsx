@@ -1,0 +1,35 @@
+import { useState } from "react";
+import { createFileRoute } from "@tanstack/react-router";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { AdminLayout } from "@/components/admin/AdminLayout";
+import { EmptyState } from "@/components/EmptyState";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { supabase } from "@/integrations/supabase/client";
+import { dataHora, linkWhatsapp, moeda } from "@/lib/format";
+import type { Database } from "@/integrations/supabase/types";
+
+type Status = Database["public"]["Enums"]["status_pedido"];
+const rotulos: Record<Status, string> = { pendente: "Pendente", em_producao: "Em produção", pronto_envio: "Pronto para envio", concluido: "Concluído", cancelado: "Cancelado" };
+type Pedido = { id: string; numero: number; criado_em: string; valor_total: number; status: Status; observacoes: string | null; clientes: { nome: string; nome_loja: string | null; whatsapp: string } | null; enderecos: { logradouro: string | null; numero: string | null; bairro: string | null; cidade: string | null; estado: string | null } | null; itens_pedido: { id: string; quantidade: number; preco_unitario: number; subtotal: number; produtos: { nome: string } | null; variacoes_cor: { cores: { nome: string } | null } | null }[]; pedido_status_historico: { id: string; status_novo: Status; criado_em: string }[] };
+export const Route = createFileRoute("/admin/pedidos")({ ssr: false, head: () => ({ meta: [
+  { title: "Pedidos | Painel Arte Rosa" }, { name: "description", content: "Acompanhe pedidos da Arte Rosa." }, { property: "og:title", content: "Pedidos | Painel Arte Rosa" }, { property: "og:description", content: "Acompanhe pedidos da Arte Rosa." }, { property: "og:type", content: "website" }, { name: "twitter:card", content: "summary_large_image" }, { name: "robots", content: "noindex" },
+] }), component: Pagina });
+function Pagina() {
+  const qc = useQueryClient(); const [busca, setBusca] = useState(""); const [filtro, setFiltro] = useState("todos"); const [selecionado, setSelecionado] = useState<string | null>(null); const [salvando, setSalvando] = useState(false);
+  const { data = [], isLoading, error } = useQuery({ queryKey: ["admin-pedidos"], queryFn: async () => { const { data, error } = await supabase.from("pedidos").select("id, numero, criado_em, valor_total, status, observacoes, clientes(nome, nome_loja, whatsapp), enderecos(logradouro, numero, bairro, cidade, estado), itens_pedido(id, quantidade, preco_unitario, subtotal, produtos(nome), variacoes_cor(cores(nome))), pedido_status_historico(id, status_novo, criado_em)").order("criado_em", { ascending: false }); if (error) throw error; return data as unknown as Pedido[]; } });
+  const pedido = data.find(p => p.id === selecionado);
+  const lista = data.filter(p => (filtro === "todos" || p.status === filtro) && `${p.numero} ${p.clientes?.nome} ${p.clientes?.nome_loja}`.toLowerCase().includes(busca.toLowerCase()));
+  async function alterar(p: Pedido, status: Status) {
+    if (status === "cancelado" && !window.confirm(`Cancelar o pedido #${p.numero} e devolver os itens ao estoque?`)) return;
+    setSalvando(true);
+    const { error } = await supabase.rpc("alterar_status_pedido", { p_pedido_id: p.id, p_status: status }); setSalvando(false);
+    if (error) { toast.error("Não foi possível mudar o pedido."); return; }
+    toast.success("Pedido atualizado!"); qc.invalidateQueries({ queryKey: ["admin-pedidos"] }); qc.invalidateQueries({ queryKey: ["admin-resumo"] }); qc.invalidateQueries({ queryKey: ["admin-estoque"] }); qc.invalidateQueries({ queryKey: ["admin-financeiro"] }); qc.invalidateQueries({ queryKey: ["produtos"] });
+  }
+  return <AdminLayout titulo="Pedidos"><div className="mb-5 flex flex-wrap gap-3"><Input aria-label="Buscar pedido" className="max-w-sm" placeholder="Buscar número ou cliente" value={busca} onChange={e => setBusca(e.target.value)}/><select aria-label="Filtrar por situação" className="rounded-lg border bg-background px-3" value={filtro} onChange={e => setFiltro(e.target.value)}><option value="todos">Todos</option>{Object.entries(rotulos).map(([k,v]) => <option key={k} value={k}>{v}</option>)}</select></div>{error ? <p role="alert">Não foi possível carregar os pedidos.</p> : isLoading ? <p>Carregando pedidos...</p> : !lista.length ? <EmptyState titulo="Nenhum pedido encontrado" descricao="Os pedidos feitos na loja aparecerão aqui."/> : <div className="space-y-2">{lista.map(p => <div key={p.id} className="flex flex-wrap items-center gap-3 border-b py-4"><div className="min-w-40 flex-1"><p className="font-semibold">#{p.numero} · {p.clientes?.nome}</p><p className="text-sm text-muted-foreground">{dataHora(p.criado_em)} · {p.clientes?.nome_loja ?? "Cliente"}</p></div><span>{moeda(p.valor_total)}</span><span className="text-sm font-semibold">{rotulos[p.status]}</span><Button variant="outline" onClick={() => setSelecionado(p.id)}>Ver detalhes</Button></div>)}</div>}
+    <Dialog open={!!pedido} onOpenChange={o => !o && setSelecionado(null)}><DialogContent className="max-h-[90vh] overflow-y-auto"><DialogHeader><DialogTitle>Pedido #{pedido?.numero}</DialogTitle></DialogHeader>{pedido && <div className="space-y-5"><div><p className="font-semibold">{pedido.clientes?.nome}</p><p>{pedido.clientes?.nome_loja} · {pedido.clientes?.whatsapp}</p><p className="text-sm text-muted-foreground">{[pedido.enderecos?.logradouro, pedido.enderecos?.numero, pedido.enderecos?.bairro, pedido.enderecos?.cidade, pedido.enderecos?.estado].filter(Boolean).join(", ")}</p></div><div>{pedido.itens_pedido.map(i => <div key={i.id} className="flex justify-between border-b py-2 text-sm"><span>{i.quantidade}× {i.produtos?.nome} · {i.variacoes_cor?.cores?.nome ?? "Cor única"}<br/><span className="text-muted-foreground">{moeda(i.preco_unitario)} cada</span></span><strong>{moeda(i.subtotal)}</strong></div>)}<p className="mt-2 text-right font-bold">Total: {moeda(pedido.valor_total)}</p></div>{pedido.observacoes && <p>Observações: {pedido.observacoes}</p>}<div><label className="mb-2 block font-semibold" htmlFor="status-pedido">Situação</label><select id="status-pedido" className="h-11 w-full rounded-lg border bg-background px-3" value={pedido.status} disabled={salvando} onChange={e => alterar(pedido, e.target.value as Status)}>{Object.entries(rotulos).map(([k,v]) => <option key={k} value={k}>{v}</option>)}</select></div><div><p className="font-semibold">Histórico</p>{pedido.pedido_status_historico.slice().sort((a,b) => b.criado_em.localeCompare(a.criado_em)).map(h => <p key={h.id} className="text-sm text-muted-foreground">{dataHora(h.criado_em)} · {rotulos[h.status_novo]}</p>)}</div>{pedido.clientes?.whatsapp && <Button asChild><a href={linkWhatsapp(pedido.clientes.whatsapp, `Olá! Sobre o pedido #${pedido.numero} da Arte Rosa.`)} target="_blank" rel="noopener noreferrer">Conversar no WhatsApp</a></Button>}</div>}</DialogContent></Dialog>
+  </AdminLayout>;
+}
